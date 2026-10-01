@@ -1,0 +1,6 @@
+.git/
+*.md
+k8s/
+helm-charts/
+*.tar
+Dockerfile

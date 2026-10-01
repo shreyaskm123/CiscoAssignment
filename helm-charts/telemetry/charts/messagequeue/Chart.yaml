@@ -1,0 +1,6 @@
+apiVersion: v2
+name: messagequeue
+description: Durably-ordered WAL message queue with one leader + N followers (gen-ordered replication) and sync-gated acks.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

@@ -1,0 +1,83 @@
+# collector chart values.
+#
+# Each replica registers with the message-queue partition registry and consumes
+# events where (offset % total == index). Write-your-own-offset commits are
+# replicated to followers, so a promoted MQ resumes collectors at the right
+# cursor. The ClickHouse table is created automatically on startup.
+
+image:
+  repository: telemetry-collector
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+# MQ to consume from (leader). Defaults to the umbrella's leader service.
+mqAddr: ""
+
+consumerId: "collector"
+
+registry:
+  ttlSeconds: 15
+  pollIntervalMs: 5000
+
+consume:
+  pollIntervalMs: 200
+
+sink: clickhouse
+
+clickhouse:
+  host: ""
+  port: 9000
+  db: telemetry
+  table: events
+  # Cluster the schema is created on (`CREATE ... ON CLUSTER <name>`) with the
+  # Replicated table engine. Must match clickhouse.cluster.name. Leave empty
+  # for a single, non-replicated server.
+  cluster: telemetry
+  # credentialsSecret points at a Secret with `user` and `password` keys holding
+  # a scoped ClickHouse account. Leave empty for the unauthenticated dev default.
+  credentialsSecret: ""
+  user: default
+  password: ""
+
+flushIntervalMs: 300
+
+# Where failed rows go on the pod (emptyDir).
+dlqPath: /var/lib/collector/dlq
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+terminationGracePeriodSeconds: 30
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Bearer-token auth for this service's MQ connection. existingSecret must be a
+# Secret containing a `collector` key (see the messagequeue chart for the full
+# layout). Leave empty to connect unauthenticated (development default).
+mqAuth:
+  existingSecret: ""
+
+# Kubernetes probes. The pod used to run `exec: ["/bin/true"]`, which cannot
+# fail, so a pod that had stopped working still reported 1/1 Running.
+#
+#   /healthz  liveness, dependency-free on purpose: reflecting ClickHouse or the
+#             message queue here would restart every replica at once when a
+#             dependency blipped, turning an outage into a crash loop.
+#   /readyz   readiness: has a shard assignment, is not failing writes right now,
+#             and has made progress within readyMaxStallSeconds. The stall check
+#             is what catches a queue that has stopped acknowledging: nothing
+#             errors, so only a clock notices.
+health:
+  port: 8082
+  # Seconds without reading/writing/committing anything before the pod reports
+  # NotReady. 0 disables the check, which is right for a deliberately idle
+  # deployment and wrong for this one.
+  readyMaxStallSeconds: 300

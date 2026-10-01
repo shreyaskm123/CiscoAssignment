@@ -1,0 +1,29 @@
+{{/*
+Headless Service over every replica.
+
+A follower resolves the elected leader by pod name under this Service
+(<pod>.<service>.<ns>.svc.cluster.local), so it reaches the leader by DNS rather
+than a hardcoded address. That is what lets a follower pick up a new leader on
+its next reconnect without being restarted or reconfigured.
+
+publishNotReadyAddresses: true because a replica that has not yet won the lease
+is still a valid replication target and must be resolvable by the other side.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "messagequeue.peersName" . }}
+  labels:
+    app.kubernetes.io/name: messagequeue
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "messagequeue.podSelector" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.port }}
+      targetPort: grpc
+      protocol: TCP

@@ -1,0 +1,29 @@
+{{- /*
+Voluntary disruptions (node drains, upgrades) must never take out the data
+replicas or the Keeper quorum together. These only gate evictions; they do not
+help with an involuntary failure, which is what replication is for.
+*/ -}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "clickhouse.fullname" . }}
+  labels:
+    {{- include "clickhouse.selectorLabels" . | nindent 4 }}
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "clickhouse.selectorLabels" . | nindent 6 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "clickhouse.keeperName" . }}
+  labels:
+    {{- include "clickhouse.keeperSelectorLabels" . | nindent 4 }}
+spec:
+  # A majority of the ensemble: 2 of 3.
+  minAvailable: {{ add (div (int .Values.keeper.replicas) 2) 1 }}
+  selector:
+    matchLabels:
+      {{- include "clickhouse.keeperSelectorLabels" . | nindent 6 }}

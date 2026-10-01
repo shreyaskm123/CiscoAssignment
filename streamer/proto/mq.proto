@@ -1,0 +1,190 @@
+syntax = "proto3";
+
+package mq;
+
+option go_package = "streamer/proto;mqpb";
+
+// MessageQueue is the contract implemented by the messageQueue service and
+// consumed by the streamer. Keeping it here as the source of truth so the
+// streamer and MQ can be generated/implemented against the same definition.
+service MessageQueue {
+  // PublishEvents is a bidirectional stream: the streamer sends Events and the
+  // MQ replies with an Ack per event. Deduplication is done by the MQ keyed on
+  // event_id (idempotent producer).
+  rpc PublishEvents(stream Event) returns (stream Ack);
+
+  // GetOffset returns the last acknowledged offset for a consumer in a group.
+  // Used by the streamer on startup (crash recovery) to resume processing from
+  // there. Offsets are group-scoped (see JoinPartitionRequest.group): the
+  // streamer group holds the last acked csv_line_offset; the collector group
+  // holds the last committed log cursor.
+  rpc GetOffset(GetOffsetRequest) returns (GetOffsetResponse);
+
+  // JoinPartition makes the MQ's partition registry aware of a consumer and
+  // returns the consumer's assigned index among the currently active set in its
+  // group. The MQ orders the live consumers of the group and hands each one a
+  // unique 0..total-1 index. Repeated calls act as a heartbeat that keeps the
+  // consumer active (dead consumers expire via ttl_seconds, which self-heals
+  // scale-downs). The group keeps independent fleets (e.g. "streamer" and
+  // "collector") from sharing one shard assignment.
+  rpc JoinPartition(JoinPartitionRequest) returns (JoinPartitionResponse);
+
+  // LeavePartition removes a consumer from the registry immediately. Used on
+  // graceful shutdown so surviving replicas rebalance without waiting for the
+  // heartbeat TTL to expire.
+  rpc LeavePartition(LeavePartitionRequest) returns (LeavePartitionResponse);
+
+  // Consume streams the consumer read path of the event log. It returns every
+  // event with offset > start_offset, in log order, up to the current end of
+  // the log, then closes the stream (the consumer re-invokes from its updated
+  // cursor to follow new events). This is the pull-based cursor model that lets
+  // consumers recover from crashes: GetOffset/CommitOffset bound where a
+  // restarted consumer resumes.
+  rpc Consume(ConsumeRequest) returns (stream ConsumedEvent);
+
+  // CommitOffset records a consumer's processed position (the highest logged
+  // offset fully written downstream). Must only be advanced after the consumer
+  // has durably persisted everything up to that offset, so a crash triggers a
+  // safe replay (duplicates are absorbed downstream). Committed cursors also
+  // advance the MQ's retention barrier for the collector group.
+  rpc CommitOffset(CommitOffsetRequest) returns (CommitOffsetResponse);
+}
+
+// Replication is the leader<->follower contract. A follower calls Sync; the
+// leader replies with a checkpoint followed by the live mutation stream. The
+// follower acknowledges each applied frame (gen) so the leader can wait for a
+// configurable number of followers before acking a publisher (sync
+// replication => an acked event is durable on a quorum => loss-free failover).
+service Replication {
+  rpc Sync(stream ReplicaAck) returns (stream ReplicaFrame);
+}
+
+// ReplicaFrame is one replicated mutation, identified by the leader's
+// generation number (monotonic per mutation). Types:
+//   "x" = checkpoint {base + all cursors}  -> followed by a full event replay
+//   "a" = append of Event (its log offset is implied by the follower's own log)
+//   "c" = commit cursor in a group
+//   "t" = retention trim (drop events with offset <= floor)
+message ReplicaFrame {
+  int64 gen = 1;
+  string type = 2;
+  ReplicaCheckpoint check = 3;
+  Event event = 4;
+  string group = 5;
+  string consumer = 6;
+  int64 offset = 7; // commit cursor
+  int64 floor = 8;  // trim barrier
+}
+
+// ReplicaAck is sent by the follower to the leader. The first message on the
+// stream is the hello: resume_log_offset = the follower's current log tail, so
+// the leader replays only events the follower does not have yet. Every later
+// message acks the last applied gen.
+message ReplicaAck {
+  int64 resume_log_offset = 1;
+  int64 gen = 2;
+}
+
+// ReplicaCheckpoint seeds a (re)connecting follower with the leader's absolute
+// log base and every durable cursor, so cursors converge even if the follower
+// was briefly offline.
+message ReplicaCheckpoint {
+  int64 base = 1;
+  repeated CursorStatus cursors = 2;
+}
+
+message CursorStatus {
+  string group = 1;
+  string consumer = 2;
+  int64 offset = 3;
+}
+
+message JoinPartitionRequest {
+  string consumer_id = 1;
+  int32 ttl_seconds = 2;
+  // group is the fleet namespace this consumer belongs to (e.g. "streamer" or
+  // "collector"). Each group owns an independent shard assignment.
+  string group = 3;
+}
+
+message JoinPartitionResponse {
+  int32 index = 1;
+  int32 total = 2;
+}
+
+message LeavePartitionRequest {
+  string consumer_id = 1;
+  // group must match the group used at JoinPartition time.
+  string group = 2;
+}
+
+message LeavePartitionResponse {}
+
+message Event {
+  // Field 2 was `timestamp`, a second copy of the event time. It is removed:
+  // source_timestamp is the only timestamp. The number and name stay reserved
+  // so they can never be reused with a different meaning.
+  reserved 2;
+  reserved "timestamp";
+
+  string event_id = 1;
+  // The streamer's current UTC time when it produced the event, RFC3339 with
+  // nanosecond precision. The CSV's own timestamp column is never used.
+  string source_timestamp = 13;
+  string metric_name = 3;
+  int32 gpu_index = 4;
+  string device_name = 5;
+  string device_id = 6;
+  string model_name = 7;
+  string hostname = 8;
+  double value = 9;
+  int64 csv_line_offset = 10;
+  int64 loop_count = 11;
+  map<string, string> tags = 12;
+}
+
+message Ack {
+  string event_id = 1;
+  int64 offset = 2;
+  bool success = 3;
+  string error = 4;
+}
+
+message GetOffsetRequest {
+  string consumer_id = 1;
+  // group scoping (see JoinPartitionRequest.group).
+  string group = 2;
+}
+
+message GetOffsetResponse {
+  int64 offset = 1;
+  bool exists = 2;
+}
+
+// ConsumeRequest: a consumer resumes reading the log from just past
+// start_offset. Consumers with a committed cursor pass their last processed
+// offset here; a never-committed consumer uses -1 to start at the beginning of
+// the retained log. group is informational (cursors live in the collector
+// group via CommitOffset).
+message ConsumeRequest {
+  string consumer_id = 1;
+  int64 start_offset = 2;
+  string group = 3;
+}
+
+// ConsumedEvent pairs an event with its log offset. The offset is what a
+// consumer commits back via CommitOffset, and the shard key a sharded fleet
+// uses to decide ownership (offset % total == index).
+message ConsumedEvent {
+  Event event = 1;
+  int64 offset = 2;
+}
+
+message CommitOffsetRequest {
+  string consumer_id = 1;
+  int64 offset = 2;
+  // group scoping of the committed cursor (see JoinPartitionRequest.group).
+  string group = 3;
+}
+
+message CommitOffsetResponse {}

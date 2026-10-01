@@ -1,0 +1,76 @@
+<!--
+# Scoped ClickHouse users for the telemetry pipeline.
+#
+# Created out-of-band and mounted from a Secret, never from a Helm value: this
+# file holds password HASHES, and a ConfigMap would publish them to anything
+# that can read configmaps. The raw passwords live in the per-service Secrets
+# telemetry-ch-collector / telemetry-ch-apigateway.
+#
+# What changed versus the development default, and why it mattered:
+#
+#   before: user `default`, EMPTY password, <ip>::/0</ip>, access_management 1
+#           -> anything that could reach 9000/8123 could read every row,
+#              DROP TABLE, and create new users.
+#   after:  `default` is loopback-only with no password (in-pod admin still
+#           works, remote passwordless access does not exist), and the two
+#           services get narrowly granted accounts.
+#
+# password_sha256_hex holds sha256(password) in hex, so this file cannot be used
+# to log in even if it leaks - only to check a guess.
+-->
+<clickhouse>
+  <users>
+    <default>
+      <password></password>
+      <networks>
+        <ip>127.0.0.1</ip>
+        <ip>::1</ip>
+      </networks>
+      <profile>default</profile>
+      <quota>default</quota>
+      <access_management>0</access_management>
+    </default>
+
+    <!-- collector: owns ingestion. Needs DDL because it bootstraps the schema
+         and runs the idempotent ADD COLUMN migration, but it is scoped to the
+         telemetry database and cannot manage users. -->
+    <telemetry_writer>
+      <password_sha256_hex>__WRITER_HASH__</password_sha256_hex>
+      <networks>
+        <ip>10.0.0.0/8</ip>
+        <ip>172.16.0.0/12</ip>
+        <ip>192.168.0.0/16</ip>
+        <ip>127.0.0.1</ip>
+        <ip>::1</ip>
+      </networks>
+      <profile>default</profile>
+      <quota>default</quota>
+      <access_management>0</access_management>
+      <grants>
+        <grant>GRANT SELECT, INSERT, ALTER, CREATE, DROP, OPTIMIZE, SHOW ON telemetry.*</grant>
+        <!-- Needed to run DDL `ON CLUSTER` (the replicated schema). It lets the
+             account address the cluster, nothing more: every object grant above
+             still applies on each replica. -->
+        <grant>GRANT CLUSTER ON *.*</grant>
+      </grants>
+    </telemetry_writer>
+
+    <!-- apiGateway: read-only. No INSERT, no DDL, no user management. -->
+    <telemetry_reader>
+      <password_sha256_hex>__READER_HASH__</password_sha256_hex>
+      <networks>
+        <ip>10.0.0.0/8</ip>
+        <ip>172.16.0.0/12</ip>
+        <ip>192.168.0.0/16</ip>
+        <ip>127.0.0.1</ip>
+        <ip>::1</ip>
+      </networks>
+      <profile>default</profile>
+      <quota>default</quota>
+      <access_management>0</access_management>
+      <grants>
+        <grant>GRANT SELECT, SHOW ON telemetry.*</grant>
+      </grants>
+    </telemetry_reader>
+  </users>
+</clickhouse>

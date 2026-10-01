@@ -1,0 +1,5 @@
+timestamp,metric_name,gpu_id,device,uuid,modelName,Hostname,container,pod,namespace,value,labels_raw
+"2025-07-18T20:42:34Z","DCGM_FI_DEV_GPU_UTIL","0","nvidia0","GPU-00000000-0000-0000-0000-000000000001","NVIDIA H100 80GB HBM3","mtv5-dgx1","","","","85.5","x=""1"""
+"2025-07-18T20:42:34Z","DCGM_FI_DEV_FB_USED","1","nvidia1","GPU-00000000-0000-0000-0000-000000000002","NVIDIA H100 80GB HBM3","mtv5-dgx2","","","","97","x=""1"""
+"2025-07-18T20:42:34Z","DCGM_FI_DEV_GPU_TEMP","0","nvidia0","GPU-00000000-0000-0000-0000-000000000003","NVIDIA H100 80GB HBM3","mtv5-dgx3","","","","42.5","x=""1"""
+"2025-07-18T20:42:34Z","bad-value-metric","3","nvidia3","GPU-00000000-0000-0000-0000-000000000004","NVIDIA H100 80GB HBM3","mtv5-dgx4","","","","not-a-number","x=""1"""

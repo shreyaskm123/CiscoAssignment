@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "streamer.fullname" . }}-metrics-csv
+  labels:
+    app.kubernetes.io/name: streamer
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  metrics.csv: {{ .Files.Get "files/metrics.csv" | quote }}

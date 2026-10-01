@@ -1,0 +1,22 @@
+apiVersion: v2
+name: telemetry
+description: End-to-end DCGM GPU telemetry pipeline - streamer -> message queue (HA leader/follower) -> collector -> ClickHouse -> apiGateway. Install into a cluster (e.g. kind) with one command.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+dependencies:
+  - name: messagequeue
+    version: 0.1.0
+    repository: ""
+  - name: streamer
+    version: 0.1.0
+    repository: ""
+  - name: collector
+    version: 0.1.0
+    repository: ""
+  - name: clickhouse
+    version: 0.1.0
+    repository: ""
+  - name: apigateway
+    version: 0.1.0
+    repository: ""

@@ -1,0 +1,113 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "apigateway.fullname" . }}
+  labels:
+    app.kubernetes.io/name: apigateway
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: apigateway
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: apigateway
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      containers:
+        - name: api
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          env:
+            - name: HTTP_ADDR
+              value: {{ .Values.httpAddr | quote }}
+            - name: CLICKHOUSE_HOST
+              value: {{ .Values.clickhouse.host | default (printf "%s-clickhouse" .Release.Name) | quote }}
+            - name: CLICKHOUSE_PORT
+              value: {{ .Values.clickhouse.port | quote }}
+            - name: CLICKHOUSE_DB
+              value: {{ .Values.clickhouse.db | quote }}
+            - name: CLICKHOUSE_TABLE
+              value: {{ .Values.clickhouse.table | quote }}
+            # A scoped, non-admin user per service, read from a Secret. When
+            # unset the chart falls back to the unauthenticated dev default.
+            {{- if .Values.clickhouse.credentialsSecret }}
+            - name: CLICKHOUSE_USER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.clickhouse.credentialsSecret | quote }}
+                  key: user
+            - name: CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.clickhouse.credentialsSecret | quote }}
+                  key: password
+            {{- else }}
+            - name: CLICKHOUSE_USER
+              value: {{ .Values.clickhouse.user | quote }}
+            - name: CLICKHOUSE_PASSWORD
+              value: {{ .Values.clickhouse.password | quote }}
+            {{- end }}
+            {{- if .Values.auth.existingSecret }}
+            # Tokens live in an externally managed Secret, not in this chart's
+            # values: values are persisted in the Helm release history, so a
+            # token supplied via --set would sit in plaintext in
+            # `helm get values`. The API re-reads this file on every request, so
+            # rotating it is a `kubectl apply` with no pod restart.
+            - name: API_TOKENS_FILE
+              value: /etc/telemetry/auth/tokens
+            {{- end }}
+            {{- if .Values.auth.tokenSigningKeySecret }}
+            # Enables POST /api/v1/token, which exchanges a caller's static
+            # credential for a short-lived signed access token. The key is an
+            # env var, not a mounted file: it is only read once at startup, and
+            # rotating it must invalidate every outstanding access token, which
+            # a kubelet file sync would not do reliably.
+            - name: API_TOKEN_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.tokenSigningKeySecret | quote }}
+                  key: signing-key
+            - name: API_TOKEN_TTL
+              value: {{ .Values.auth.tokenTTL | quote }}
+            {{- end }}
+          {{- if .Values.auth.existingSecret }}
+          volumeMounts:
+            - name: auth-tokens
+              mountPath: /etc/telemetry/auth
+              readOnly: true
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      {{- if .Values.auth.existingSecret }}
+      volumes:
+        - name: auth-tokens
+          secret:
+            secretName: {{ .Values.auth.existingSecret | quote }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}

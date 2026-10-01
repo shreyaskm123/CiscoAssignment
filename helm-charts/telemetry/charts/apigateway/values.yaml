@@ -1,0 +1,55 @@
+# apiGateway chart values.
+
+image:
+  repository: telemetry-api
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicas: 1
+
+httpAddr: ":8080"
+servicePort: 8080
+
+clickhouse:
+  host: ""            # defaults to <release>-clickhouse
+  port: 9000
+  db: telemetry
+  table: events
+  # credentialsSecret points at a Secret with `user` and `password` keys holding
+  # a scoped ClickHouse account. Leave empty for the unauthenticated dev default.
+  credentialsSecret: ""
+  user: default
+  password: ""
+
+# Bearer-token auth for /api/v1. Point existingSecret at a Secret YOU create
+# outside Helm:
+#
+#   kubectl create secret generic telemetry-api-tokens \
+#     --from-literal=tokens='shreyas=<token>' -n telemetry
+#
+# Leave it empty to run unauthenticated (development default). The Secret's
+# `tokens` key holds a comma-separated identity=token list, e.g.
+# "shreyas=abc123,prometheus=def456" - one entry per client, never a single
+# global token. /healthz stays unauthenticated because kubelet probes carry no
+# Authorization header.
+auth:
+  existingSecret: ""
+  # Secret holding key `signing-key` (hex, >= 32 bytes). When set, the API
+  # serves POST /api/v1/token and accepts signed short-lived access tokens
+  # alongside the static ones. Leave empty to disable the feature entirely.
+  tokenSigningKeySecret: ""
+  # Access-token lifetime. Deliberately short: this is the only credential a
+  # human is expected to hold outside the cluster.
+  tokenTTL: 15m
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

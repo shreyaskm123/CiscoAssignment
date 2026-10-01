@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "clickhouse.fullname" . }}
+  labels:
+    app.kubernetes.io/name: clickhouse
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: clickhouse
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: native
+      port: {{ .Values.ports.native }}
+      targetPort: native
+    - name: http
+      port: {{ .Values.ports.http }}
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "clickhouse.headlessName" . }}
+  labels:
+    app.kubernetes.io/name: clickhouse
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  # Replicas must be able to resolve each other BEFORE they are Ready: a
+  # replica only turns Ready once it has caught up, and catching up needs the
+  # peer's name. Without this the pair can deadlock after a full restart.
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: clickhouse
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: native
+      port: {{ .Values.ports.native }}
+      targetPort: native
+    - name: interserver
+      port: {{ .Values.ports.interserver }}
+      targetPort: interserver

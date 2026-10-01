@@ -1,0 +1,6 @@
+apiVersion: v2
+name: apigateway
+description: Read-only HTTP API over the ClickHouse telemetry table (list GPUs, GPU telemetry by time window).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

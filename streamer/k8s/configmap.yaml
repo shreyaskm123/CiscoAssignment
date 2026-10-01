@@ -1,0 +1,17 @@
+# Sample metrics CSV mounted into every streamer pod. Rows follow the DCGM
+# exporter format: timestamp,metric_name,gpu_id,device,uuid,modelName,
+# Hostname,container,pod,namespace,value,labels_raw
+#
+# For the full dataset use:
+#   kubectl create configmap metrics-csv --from-file=metrics.csv=/path/to/dcgm_metrics.csv
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metrics-csv
+  namespace: telemetry
+data:
+  metrics.csv: |
+    timestamp,metric_name,gpu_id,device,uuid,modelName,Hostname,container,pod,namespace,value,labels_raw
+    "2025-07-18T20:42:34Z","DCGM_FI_DEV_GPU_UTIL","0","nvidia0","GPU-00000000-0000-0000-0000-000000000001","NVIDIA H100 80GB HBM3","mtv5-dgx1-hgpu-031","","","","0","DCGM_FI_DRIVER_VERSION=""535.129.03"""""
+    "2025-07-18T20:42:34Z","DCGM_FI_DEV_GPU_UTIL","1","nvidia1","GPU-00000000-0000-0000-0000-000000000002","NVIDIA H100 80GB HBM3","mtv5-dgx1-hgpu-031","","","","100","DCGM_FI_DRIVER_VERSION=""535.129.03"""""
+    "2025-07-18T20:42:34Z","DCGM_FI_DEV_FB_USED","0","nvidia0","GPU-00000000-0000-0000-0000-000000000003","NVIDIA H100 80GB HBM3","mtv5-dgx1-hgpu-022","","","","53198","DCGM_FI_DRIVER_VERSION=""535.129.03"""""

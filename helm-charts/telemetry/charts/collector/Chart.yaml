@@ -1,0 +1,6 @@
+apiVersion: v2
+name: collector
+description: Consumes the telemetry stream from the message queue and writes it to ClickHouse (registry-driven partitioning, self-provisioned schema).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

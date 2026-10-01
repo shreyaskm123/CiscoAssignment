@@ -1,0 +1,25 @@
+# Horizontal Pod Autoscaler for the telemetry streamer.
+#
+# Scale events are detected automatically: every pod heartbeats the MQ
+# partition registry every REGISTRY_POLL_INTERVAL_MS, so when the HPA changes
+# the replica count the new total shows up in the registry and all pods
+# repartition on their next heartbeat. Nothing else needs to be kept in sync.
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: telemetry-streamer
+  namespace: telemetry
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: telemetry-streamer
+  minReplicas: 1
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60

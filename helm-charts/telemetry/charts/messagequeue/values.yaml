@@ -1,0 +1,118 @@
+# messagequeue chart values.
+#
+# HA model: every replica runs the SAME command and elects its own role from a
+# Kubernetes Lease. The winner serves writes and replicates to the others; the
+# losers serve reads from their own WAL and follow whoever currently leads. A
+# replica promotes itself in place when the lease moves, so failover needs no
+# manual step, no restart, and no change to the client configuration.
+#
+#   kubectl -n telemetry get pods -l app.kubernetes.io/name=messagequeue \
+#     -L app.kubernetes.io/component
+#   # telemetry-messagequeue-0   leader      <- lease holder
+#   # telemetry-messagequeue-1   follower
+#
+# `replicas: 2` is the minimum that gives any HA at all. With 1 replica there
+# is no failover, only restart. With 2 the pair survives the loss of either.
+#
+# syncReplicas must be <= (replicas - 1), or publishes stall: with 2 replicas and
+# syncReplicas 1, an ack means the event is on the survivor's disk before the
+# leader can die. Setting it to replicas would deadlock - no quorum exists at
+# N=2, since losing one node can never satisfy replicas-fraction-of-replicas.
+# Leave it at 1.
+
+image:
+  repository: telemetry-mq
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# One StatefulSet of identical replicas. Replica 0 is not privileged: any pod
+# may win the lease, including on its first boot.
+replicas: 2
+
+# Port is the gRPC server listen port INSIDE every pod.
+port: 50051
+
+# Port clients (streamer, collector) connect to. This Service selects only the
+# pod labelled component=leader, so its endpoints follow the election.
+servicePort: 50051
+
+# Port for the HTTP probe endpoints (/readyz, /healthz). Readiness is
+# lease-aware so a leader that cannot reach the API server stops receiving
+# traffic; see the readinessProbe comment in the StatefulSet.
+healthPort: 8081
+
+# Number of followers that must apply before the leader acks a publish. Keep
+# this at replicas-1 or lower.
+syncReplicas: 1
+
+dataDir: /var/lib/mq/wal.log
+
+# Publishes the health port (/healthz, /readyz, /metrics) on a node port, one
+# stable URL per replica, so metrics can be read from a browser or scraped by an
+# external Prometheus without `kubectl port-forward`.
+#
+# Off by default on purpose: /metrics needs no authentication and exposes queue
+# internals, so a node port is a real disclosure on a shared cluster. nodePortBase
+# is the port for replica 0; replica N uses nodePortBase+N. Leave nodePortBase
+# empty to let Kubernetes allocate.
+metrics:
+  enabled: false
+  nodePortBase: 30910
+  # Source CIDRs allowed to scrape the health port, and it must list them
+  # explicitly: the pod sees the address of whatever last handled the
+  # connection, which is the node for a node-port scrape but the Docker bridge
+  # address when a container on the kind network forwards for the host. Empty
+  # falls back to apiServer.ipBlocks, which covers only the node.
+  allowedCIDRs:
+    - 172.18.0.2/32
+
+leaderElection:
+  enabled: true
+  # Name of the coordination.k8s.io Lease. Both replicas contend for this one
+  # object; its holderIdentity is the current leader.
+  leaseName: mq-leader
+  # How long a lease stays valid without renewal. This is the lower bound on
+  # failover time: a dead leader is only replaced after its lease expires.
+  leaseDuration: 15s
+  # How long a leader that cannot reach the API server keeps trying before it
+  # fences itself read-only. Must be comfortably less than leaseDuration so a
+  # leader always gives up before a rival is entitled to take over - that
+  # ordering is what prevents two nodes acking at once.
+  renewDeadline: 10s
+  retryPeriod: 2s
+
+# Bearer-token auth for every MQ RPC (publish, consume AND replication).
+# Point existingSecret at a Secret YOU create outside Helm:
+#
+#   kubectl create secret generic telemetry-mq-tokens -n telemetry \
+#     --from-literal=tokens='streamer=<t>,collector=<t>,mq=<t>' \
+#     --from-literal=streamer=<t> --from-literal=collector=<t> \
+#     --from-literal=mq=<t>
+#
+# `tokens` is the accepted set the server enforces; each client also gets its
+# own key so a pod never mounts another service's token. The `mq` key is what a
+# replica presents when it replicates from the elected leader. Leave empty to run
+# unauthenticated (development default).
+auth:
+  existingSecret: ""
+
+storage:
+  size: 1Gi
+  # Leave empty to use the cluster default storage class (kind ships local-path).
+  className: ""
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 512Mi
+  limits:
+    cpu: "1"
+    memory: 1Gi
+
+# Anti-affinity so the two replicas land on different nodes. Without it a
+# single node failure takes both down at once and the HA is decorative.
+podAntiAffinity: true
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

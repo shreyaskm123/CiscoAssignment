@@ -1,0 +1,152 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "clickhouse.fullname" . }}
+  labels:
+    app.kubernetes.io/name: clickhouse
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  serviceName: {{ include "clickhouse.fullname" . }}-headless
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: clickhouse
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: clickhouse
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      annotations:
+        # Config is mounted by subPath, which the kubelet never refreshes, so a
+        # config change must roll the pods.
+        checksum/replication-config: {{ include (print $.Template.BasePath "/configmap-replication.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: clickhouse
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- $isSecret := required "clickhouse.interserver.existingSecret is required: replicas authenticate to each other with it (Secret with a `secret` key)" .Values.interserver.existingSecret }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # This pod's own DNS name under the headless Service. Kubernetes
+            # expands $(VAR) only from variables defined EARLIER in the list.
+            - name: CLICKHOUSE_INTERSERVER_HOST
+              value: "$(POD_NAME).{{ include "clickhouse.headlessName" . }}.$(POD_NAMESPACE).svc.cluster.local"
+            - name: CLICKHOUSE_INTERSERVER_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $isSecret | quote }}
+                  key: secret
+          {{- if .Values.auth.existingSecret }}
+            # We supply our own users.d from a Secret, so the entrypoint must
+            # not also manage users: it would otherwise write its own
+            # default-user.xml on top of ours (and, with no CLICKHOUSE_USER
+            # password set, that file locks the server out with exit code 36).
+            - name: CLICKHOUSE_SKIP_USER_SETUP
+              value: "1"
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.ports.http }}
+            - name: native
+              containerPort: {{ .Values.ports.native }}
+            - name: interserver
+              containerPort: {{ .Values.ports.interserver }}
+          livenessProbe:
+            tcpSocket:
+              port: native
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          # ClickHouse's own replication health check (HTTP /replicas_status).
+          # It deliberately does NOT fail when the table is read-only: if Keeper
+          # loses its quorum both replicas go read-only, and pulling them out of
+          # the Service then would take reads down along with writes. They stay
+          # in rotation instead, the API keeps answering, and the collector
+          # retries its inserts (its MQ offset only advances after a write
+          # succeeds) until Keeper is back.
+          readinessProbe:
+            httpGet:
+              path: /replicas_status
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.dataDir }}
+            # A single file via subPath, so the image's own config.d (which sets
+            # listen_host) stays in place.
+            - name: replication-config
+              mountPath: /etc/clickhouse-server/config.d/replication.xml
+              subPath: replication.xml
+              readOnly: true
+            {{- if .Values.auth.existingSecret }}
+            # users.xml is projected from a Secret as a single file (subPath) so
+            # that users.d itself stays a WRITABLE directory: the official
+            # entrypoint writes its own default-user.xml there, and a read-only
+            # directory mount makes the server exit with code 36 before it ever
+            # listens. A directory-wide ConfigMap mount would also publish the
+            # credentials, since ConfigMaps are not access-controlled.
+            - name: users-secret
+              mountPath: /etc/clickhouse-server/users.d/users.xml
+              subPath: users.xml
+              readOnly: true
+            {{- else }}
+            - name: users
+              mountPath: /etc/clickhouse-server/users.d
+            {{- end }}
+      {{- if .Values.podAntiAffinity }}
+      # Prefer different nodes for the replicas. Soft, so a one-node cluster
+      # still schedules; on a real cluster this is what makes a node loss
+      # survivable.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "clickhouse.selectorLabels" . | nindent 20 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: replication-config
+          configMap:
+            name: {{ include "clickhouse.fullname" . }}-replication
+        {{- if .Values.auth.existingSecret }}
+        - name: users-secret
+          secret:
+            secretName: {{ .Values.auth.existingSecret | quote }}
+        {{- else }}
+        - name: users
+          configMap:
+            name: {{ include "clickhouse.fullname" . }}-users
+        {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.storage.className }}
+        storageClassName: {{ .Values.storage.className | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size | quote }}

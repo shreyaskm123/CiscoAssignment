@@ -1,0 +1,31 @@
+{{/*
+The Service every client publishes to and consumes from.
+
+Its selector matches component=leader, and the elected replica sets that label
+on itself. So this Service's endpoint list IS the current leader: when the
+leader fails and the survivor promotes itself, the endpoint moves to the
+survivor and clients reconnect to it with no configuration change anywhere.
+This is the whole client-facing failover mechanism.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "messagequeue.leaderName" . }}
+  labels:
+    app.kubernetes.io/name: messagequeue
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: leader
+  annotations:
+    # With one endpoint this is deliberately not a load balancer across
+    # replicas: only the leader accepts writes, so spreading traffic would send
+    # most requests to read-only nodes and surface as FailedPrecondition.
+    service.beta.kubernetes.io/aws-load-balancer-type: nlb
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "messagequeue.leaderSelector" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.servicePort }}
+      targetPort: grpc
+      protocol: TCP

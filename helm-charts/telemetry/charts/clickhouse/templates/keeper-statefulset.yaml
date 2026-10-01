@@ -1,0 +1,115 @@
+{{- /*
+ClickHouse Keeper: the Raft ensemble that coordinates replication (which parts
+exist, which replica is behind, the DDL queue). Without a quorum every
+replicated table goes read-only, so this is deployed as 3 members: it keeps a
+quorum with one member down. Do not run it with an even count.
+*/ -}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "clickhouse.keeperHeadlessName" . }}
+  labels:
+    {{- include "clickhouse.keeperSelectorLabels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  clusterIP: None
+  # Members must find each other while they are still starting: the first one
+  # cannot become Ready until a quorum exists, which needs the others' names.
+  publishNotReadyAddresses: true
+  selector:
+    {{- include "clickhouse.keeperSelectorLabels" . | nindent 4 }}
+  ports:
+    - name: client
+      port: 2181
+      targetPort: client
+    - name: raft
+      port: 9234
+      targetPort: raft
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "clickhouse.keeperName" . }}
+  labels:
+    {{- include "clickhouse.keeperSelectorLabels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "clickhouse.keeperHeadlessName" . }}
+  replicas: {{ .Values.keeper.replicas }}
+  # All members start together so a quorum can form; OrderedReady would hold
+  # member 1 back until member 0 is Ready, and member 0 needs a quorum.
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "clickhouse.keeperSelectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "clickhouse.keeperSelectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/keeper-config: {{ include (print $.Template.BasePath "/keeper-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: keeper
+          image: "{{ .Values.keeper.image.repository }}:{{ .Values.keeper.image.tag }}"
+          imagePullPolicy: {{ .Values.keeper.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            # server_id = pod ordinal + 1 (Raft ids start at 1).
+            - export KEEPER_ID=$((${HOSTNAME##*-} + 1)); exec clickhouse-keeper --config-file=/etc/keeper-config/keeper_config.xml
+          ports:
+            - name: client
+              containerPort: 2181
+            - name: raft
+              containerPort: 9234
+          readinessProbe:
+            tcpSocket:
+              port: client
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: client
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            failureThreshold: 6
+          resources:
+            {{- toYaml .Values.keeper.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/clickhouse-keeper
+            - name: config
+              mountPath: /etc/keeper-config
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "clickhouse.keeperName" . }}-config
+      {{- if .Values.podAntiAffinity }}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "clickhouse.keeperSelectorLabels" . | nindent 20 }}
+      {{- end }}
+      {{- with .Values.keeper.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.keeper.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.keeper.storage.className }}
+        storageClassName: {{ .Values.keeper.storage.className | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.keeper.storage.size | quote }}

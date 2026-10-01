@@ -1,0 +1,65 @@
+# Umbrella values. Each section is passed to the matching subchart.
+# Important cross-links (keep in sync with chart fullname = <release>-<chart>):
+#   streamer/collector point at the MQ leader service  -> <release>-messagequeue-leader:50051
+#   collector/api point at ClickHouse                  -> <release>-clickhouse:9000
+
+# All component images default to locally built tags (kind load docker-image).
+# Override per subchart, e.g. --set streamer.image.repository=registry.example/streamer
+
+networkPolicy:
+  # Renders the default-deny + allow-list policies. These are enforced by
+  # kind's kindnet CNI; see docs/operations.md before changing them.
+  enabled: true
+
+messagequeue:
+  # Total MQ replicas. 2 is the minimum for any HA (1 replica only restarts).
+  # Every replica runs an identical command and elects its own role from a
+  # Kubernetes Lease, so a replica can become the leader without a redeploy.
+  replicas: 2
+  # Followers that must apply before the leader acks a publish. With 2 replicas
+  # this means an acked event is already on the survivor's disk before the
+  # leader can die. Never set this to replicas: N=2 has no quorum.
+  syncReplicas: 1
+  # Extra egress targets needed for the replicas to reach the Kubernetes API
+  # server, used only by the mq-leader-election-egress NetworkPolicy.
+  #
+  # A ClusterIP-based egress rule alone is not always sufficient. On kind the
+  # apiserver listens on the control-plane node's bridge IP at port 6443 and
+  # kube-proxy DNATs the 10.96.0.1:443 service IP to it. kindnet evaluates
+  # egress against the post-DNAT destination, so the policy sees port 6443 and
+  # drops the connection - which leaves every replica a follower forever while
+  # both Pods report Running.
+  #
+  # Set this to the control-plane endpoint for your cluster:
+  #   kind:   {cidr: 172.18.0.2/32, port: 6443}   # verify: nc -z <node-ip> 6443
+  #   kubeadm/managed: usually not needed, the podSelector rule suffices.
+  apiServer:
+    ipBlocks: []
+  leaderElection:
+    enabled: true
+    # Lower bound on failover time: a dead leader is only replaced once its
+    # lease goes stale.
+    leaseDuration: 15s
+    renewDeadline: 10s
+    retryPeriod: 2s
+
+streamer:
+  replicas: 3
+  mqAddr: telemetry-messagequeue-leader:50051
+
+collector:
+  replicas: 1
+  mqAddr: telemetry-messagequeue-leader:50051
+  clickhouse:
+    host: telemetry-clickhouse
+    port: 9000
+
+clickhouse:
+  storage:
+    size: 5Gi
+
+apigateway:
+  replicas: 1
+  clickhouse:
+    host: telemetry-clickhouse
+    port: 9000

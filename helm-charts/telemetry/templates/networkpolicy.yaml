@@ -1,0 +1,373 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $inst := .Release.Name }}
+{{- /*
+  Default-deny + explicit allow list for the telemetry pipeline.
+
+  Data flow:
+    streamer  -> mq leader  :50051   (publish)
+    collector -> mq leader  :50051   (consume)
+    follower  -> mq leader  :50051   (replication)
+    collector -> clickhouse :9000    (native protocol, INSERT/ALTER)
+    apigateway-> clickhouse :9000    (native protocol, SELECT)
+    clickhouse-> clickhouse :9000,:9009 (replica fetches, ON CLUSTER DDL)
+    clickhouse-> keeper     :2181    (replication coordination)
+    keeper    -> keeper     :2181,:9234 (Raft)
+    kubelet   -> pods       : probe ports (liveness/readiness)
+    user      -> apigateway :8080    (via port-forward/ingress)
+
+  CAVEAT: a connection must be allowed in BOTH directions - the destination
+  needs an ingress rule AND the client needs an egress rule. The egress half is
+  easy to forget, and the failure mode is deceptive: long-lived connections
+  that were established before the policy was applied keep working, so writes
+  appear to succeed while every new dial times out. See docs/operations.md.
+*/ -}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# DNS must stay reachable, otherwise every hostname lookup above fails.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# MQ leader: clients publish/consume, follower replicates.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mq-leader-ingress
+spec:
+  # Role-agnostic selector: with automatic leader election both replicas run
+  # the same server on 50051, and either can become the leader at any time. A
+  # component=leader selector here would cut the surviving replica off from
+  # clients for the whole time it takes to relabel itself after a failover.
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: messagequeue
+      app.kubernetes.io/instance: {{ $inst }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: streamer
+              app.kubernetes.io/instance: {{ $inst }}
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: collector
+              app.kubernetes.io/instance: {{ $inst }}
+        # Peer replication: a replica pulls from whichever replica leads.
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: messagequeue
+              app.kubernetes.io/instance: {{ $inst }}
+      ports:
+        - protocol: TCP
+          port: 50051
+---
+# MQ replicas must reach the Kubernetes API to contend for the leader Lease and
+# to relabel themselves. Without this the election cannot run at all and every
+# replica stays a read-only follower forever, which presents as "the MQ is up but
+# nothing is published".
+#
+# Three rules are needed because the API server is reachable in three different
+# ways depending on the CNI and how kindnet evaluates egress. Allow too little
+# and the election silently fails; each rule below is only as narrow as it needs
+# to be.
+#
+#  1. The kubernetes.default ClusterIP on 443. This is what in-cluster clients
+#     use via KUBERNETES_SERVICE_HOST.
+#  2. The API server pod, matched on both label spellings (kubeadm/kind use
+#     component=kube-apiserver; GKE/EKS use k8s-app=kube-apiserver). Only
+#     meaningful on CNIs that attribute hostNetwork pods to a namespace/pod
+#     selector.
+#  3. The control-plane node on the real serving port. On kind the apiserver
+#     listens on the node's bridge IP at 6443 and kube-proxy DNATs the
+#     ClusterIP 443 to it. kindnet matches egress against the post-DNAT
+#     destination, so without this rule the port seen by the policy is 6443 and
+#     not 443 - the connection is dropped even though rule 1 looks correct.
+#     Verify with: nc -z <node-bridge-ip> 6443 from inside a replica pod.
+#
+# Rule 3 is driven by apiServer. For a real cluster set
+# messagequeue.apiServer.ipBlocks explicitly; the default targets the loopback
+# service CIDR which keeps local and CI runs working without leaking egress.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mq-leader-election-egress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: messagequeue
+      app.kubernetes.io/instance: {{ $inst }}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 10.96.0.1/32
+      ports:
+        - protocol: TCP
+          port: 443
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchExpressions:
+              - key: component
+                operator: In
+                values: [kube-apiserver]
+              - key: k8s-app
+                operator: In
+                values: [kube-apiserver]
+      ports:
+        - protocol: TCP
+          port: 443
+{{- range $block := .Values.messagequeue.apiServer.ipBlocks }}
+    - to:
+        - ipBlock:
+            cidr: {{ $block.cidr | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ $block.port }}
+{{- end }}
+---
+{{- if .Values.messagequeue.metrics.enabled }}
+# The MQ health/metrics port, opened ONLY when messagequeue.metrics.enabled is
+# set. Two things make this necessary and narrow:
+#
+#  1. default-deny-all selects every pod for Ingress, and the only other MQ
+#     ingress rules cover only the gRPC port. Without this rule /metrics is reachable
+#     from nothing, which is why the kubelet probes still work (kindnet does not
+#     attribute node-originated probe traffic to a pod) while an actual scrape
+#     is dropped.
+#  2. It is scoped to healthPort and to the node CIDRs, not opened to the world.
+#     Traffic arriving via the node port has already been DNAT'd by kube-proxy
+#     and is attributed to the node, so a podSelector or namespaceSelector here
+#     would not match it. apiServer.ipBlocks is reused because it already
+#     identifies the control-plane node on kind; set it for a real cluster.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mq-metrics-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: messagequeue
+      app.kubernetes.io/instance: {{ $inst }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        {{- $cidrs := .Values.messagequeue.metrics.allowedCIDRs | default .Values.messagequeue.apiServer.ipBlocks }}
+        {{- range $cidrs }}
+        - ipBlock:
+            cidr: {{ if kindIs "string" . }}{{ . }}{{ else }}{{ .cidr }}{{ end }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.messagequeue.healthPort }}
+---
+{{- end }}
+# ClickHouse native protocol, least-privilege per role. Ports 8123/9009 are
+# intentionally NOT opened: nothing in the cluster needs them.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: clickhouse-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: clickhouse
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: collector
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: apigateway
+      ports:
+        - protocol: TCP
+          port: 9000
+---
+# ClickHouse replication. Replicas fetch parts from each other on 9009 and run
+# ON CLUSTER DDL over 9000; both directions are needed on both sides. Port 9009
+# is open ONLY between ClickHouse pods - clients never need it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: clickhouse-replication
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: clickhouse
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+      ports:
+        - protocol: TCP
+          port: 9000
+        - protocol: TCP
+          port: 9009
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+      ports:
+        - protocol: TCP
+          port: 9000
+        - protocol: TCP
+          port: 9009
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse-keeper
+      ports:
+        - protocol: TCP
+          port: 2181
+---
+# Keeper: clients (the ClickHouse replicas) on 2181, and the members among
+# themselves on 2181 (forwarding) and 9234 (Raft). Nothing else may reach it:
+# Keeper holds the replication metadata and has no authentication of its own,
+# so this policy IS its access control.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: clickhouse-keeper
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: clickhouse-keeper
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+      ports:
+        - protocol: TCP
+          port: 2181
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse-keeper
+      ports:
+        - protocol: TCP
+          port: 2181
+        - protocol: TCP
+          port: 9234
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse-keeper
+      ports:
+        - protocol: TCP
+          port: 2181
+        - protocol: TCP
+          port: 9234
+---
+# API gateway. The port is opened to any source because kubelet probes
+# (/healthz) and operator access (port-forward/ingress) must both work;
+# authentication is enforced in-process by the bearer-token middleware.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: apigateway-ingress
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: apigateway
+  policyTypes:
+    - Ingress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 8080
+---
+# EGRESS half for the MQ. Without this the collectors/streamers cannot dial the
+# broker at all, even though mq-leader-ingress above allows the packets in.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mq-client-egress
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - streamer
+          - collector
+          - messagequeue
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/component: leader
+      ports:
+        - protocol: TCP
+          port: 50051
+---
+# EGRESS half for ClickHouse: collector writes, apigateway reads.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: clickhouse-client-egress
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - collector
+          - apigateway
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: clickhouse
+      ports:
+        - protocol: TCP
+          port: 9000
+{{- end }}

@@ -1,0 +1,70 @@
+# streamer chart values.
+#
+# Every replica runs the SAME sample CSV (mounted from a ConfigMap) and
+# registers with the message-queue partition registry. Each pod derives its
+# partition index from its rank in the live registry, so scaling up/down
+# repartitions automatically (currentLineNum % total == index). There is no
+# static-mode fallback - the registry is the only source of truth.
+
+image:
+  repository: telemetry-streamer
+  tag: latest
+  pullPolicy: IfNotPresent
+
+replicas: 3
+
+# MQ to publish to. Defaults to the umbrella's leader service.
+mqAddr: ""
+
+cluster: "ai-prod-01"
+
+# CSV mounted into every pod.
+csvPath: /mnt/data/metrics.csv
+csvConfigMap: ""        # defaults to <release>-streamer-metrics-csv (created by this chart)
+
+registry:
+  ttlSeconds: 15
+  pollIntervalMs: 5000
+
+pipeline:
+  rowDelayMs: 5
+  batchSize: 100
+  flushIntervalMs: 200
+  reloadCheckIntervalSeconds: 5
+  shutdownGraceMs: 5000
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+terminationGracePeriodSeconds: 30
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# Bearer-token auth for this service's MQ connection. existingSecret must be a
+# Secret containing a `streamer` key (see the messagequeue chart for the full
+# layout). Leave empty to connect unauthenticated (development default).
+mqAuth:
+  existingSecret: ""
+
+# Kubernetes probes. The pod used to run `exec: ["/bin/true"]`, which cannot
+# fail, so a pod that had stopped working still reported 1/1 Running.
+#
+#   /healthz  liveness, dependency-free on purpose: reflecting ClickHouse or the
+#             message queue here would restart every replica at once when a
+#             dependency blipped, turning an outage into a crash loop.
+#   /readyz   readiness: has a shard assignment, is not failing writes right now,
+#             and has made progress within readyMaxStallSeconds. The stall check
+#             is what catches a queue that has stopped acknowledging: nothing
+#             errors, so only a clock notices.
+health:
+  port: 8082
+  # Seconds without reading/writing/committing anything before the pod reports
+  # NotReady. 0 disables the check, which is right for a deliberately idle
+  # deployment and wrong for this one.
+  readyMaxStallSeconds: 300

@@ -1,0 +1,5 @@
+.git/
+helm-charts/
+scripts/
+dist/
+*.tar

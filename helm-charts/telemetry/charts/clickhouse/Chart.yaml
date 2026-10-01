@@ -1,0 +1,6 @@
+apiVersion: v2
+name: clickhouse
+description: Replicated ClickHouse (one shard, N replicas) with a 3-member ClickHouse Keeper ensemble, for the telemetry events table (native 9000 + HTTP 8123). Schema is self-provisioned by the collector.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

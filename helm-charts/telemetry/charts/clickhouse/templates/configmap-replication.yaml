@@ -1,0 +1,72 @@
+{{- /*
+Replication config for the ClickHouse servers, dropped into config.d/.
+
+Per-pod values (the replica name and this pod's own DNS name) come from
+environment variables via from_env, so one ConfigMap serves every replica. The
+credential is also from_env: it must never be written into a ConfigMap, which
+is readable by anything that can read configmaps.
+*/ -}}
+{{- $ns := .Release.Namespace -}}
+{{- $fullname := include "clickhouse.fullname" . -}}
+{{- $headless := include "clickhouse.headlessName" . -}}
+{{- $keeper := include "clickhouse.keeperName" . -}}
+{{- $keeperHeadless := include "clickhouse.keeperHeadlessName" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fullname }}-replication
+  labels:
+    {{- include "clickhouse.selectorLabels" . | nindent 4 }}
+data:
+  replication.xml: |
+    <clickhouse>
+      <!-- Replica fetches. interserver_http_host is the name OTHER replicas
+           use to reach this one; it is published through Keeper, so it must be
+           this pod's cluster-resolvable DNS name, not its short hostname. -->
+      <interserver_http_port>{{ .Values.ports.interserver }}</interserver_http_port>
+      <interserver_http_host from_env="CLICKHOUSE_INTERSERVER_HOST"/>
+      <interserver_http_credentials>
+        <user>interserver</user>
+        <password from_env="CLICKHOUSE_INTERSERVER_SECRET"/>
+      </interserver_http_credentials>
+
+      <macros>
+        <shard>01</shard>
+        <replica from_env="POD_NAME"/>
+      </macros>
+
+      <zookeeper>
+        {{- range $i := until (int .Values.keeper.replicas) }}
+        <node>
+          <host>{{ $keeper }}-{{ $i }}.{{ $keeperHeadless }}.{{ $ns }}.svc.cluster.local</host>
+          <port>2181</port>
+        </node>
+        {{- end }}
+        <session_timeout_ms>30000</session_timeout_ms>
+        <operation_timeout_ms>10000</operation_timeout_ms>
+      </zookeeper>
+
+      <distributed_ddl>
+        <path>/clickhouse/task_queue/ddl</path>
+      </distributed_ddl>
+
+      <remote_servers>
+        <{{ .Values.cluster.name }}>
+          <!-- With a cluster secret, ON CLUSTER DDL runs on the other replicas
+               as the user that issued it (and with that user's grants) rather
+               than as an anonymous cluster user. -->
+          <secret from_env="CLICKHOUSE_INTERSERVER_SECRET"/>
+          <shard>
+            <!-- The Replicated table engine copies data between replicas
+                 itself; an insert must go to ONE replica only. -->
+            <internal_replication>true</internal_replication>
+            {{- range $i := until (int .Values.replicas) }}
+            <replica>
+              <host>{{ $fullname }}-{{ $i }}.{{ $headless }}.{{ $ns }}.svc.cluster.local</host>
+              <port>{{ $.Values.ports.native }}</port>
+            </replica>
+            {{- end }}
+          </shard>
+        </{{ .Values.cluster.name }}>
+      </remote_servers>
+    </clickhouse>

@@ -1,0 +1,639 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Telemetry API",
+    "version": "1.0.0",
+    "description": "Read access to GPU telemetry collected by the DCGM-style pipeline (streamer -> message queue -> collector -> ClickHouse)."
+  },
+  "paths": {
+    "/api/v1/gpus": {
+      "get": {
+        "operationId": "listGPUs",
+        "summary": "List GPUs with telemetry",
+        "description": "One page of the GPUs that have telemetry, sorted by device id. Follow `next` to walk the rest.",
+        "tags": [
+          "GPUs"
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum rows in the page (1..1000).",
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "format": "int32",
+              "default": 10
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Zero-based offset to start at. An alternative to cursor for random access; ignored when cursor is present.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "format": "int32"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Resume key taken from a previous page's `next` link. Follow `next` rather than building cursors.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "description": "Sort direction. asc (default) is oldest first; desc is newest first. It also selects which side of the cursor to resume from, so keep it the same while paging.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GPUListResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request: invalid path parameter, window or paging argument. The message names the offending field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, unknown or expired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/gpus/{id}/telemetry": {
+      "get": {
+        "operationId": "getGPUTelemetry",
+        "summary": "Get telemetry for one GPU",
+        "description": "Metric observations for a single GPU, ordered by (source_ts, event_id) in the requested direction. `start_time` and `end_time` bound the window inclusively and are compared against `source_ts`, the time the streamer produced the event. There is no endpoint that returns a GPU's metadata on its own; that is what GET /api/v1/gpus is for.",
+        "tags": [
+          "Telemetry"
+        ],
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "GPU id, as returned by GET /api/v1/gpus (the `GPU-…` value, not the numeric index).",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Maximum rows in the page (1..1000).",
+            "schema": {
+              "type": "integer",
+              "maximum": 1000,
+              "minimum": 1,
+              "format": "int32",
+              "default": 10
+            }
+          },
+          {
+            "name": "offset",
+            "in": "query",
+            "description": "Zero-based offset to start at. An alternative to cursor for random access; ignored when cursor is present.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "format": "int32"
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "Resume key taken from a previous page's `next` link. Follow `next` rather than building cursors.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "order",
+            "in": "query",
+            "description": "Sort direction. asc (default) is oldest first; desc is newest first. It also selects which side of the cursor to resume from, so keep it the same while paging.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "asc",
+                "desc"
+              ]
+            }
+          },
+          {
+            "name": "start_time",
+            "in": "query",
+            "description": "Inclusive start of the window, RFC3339. Must not be after end_time.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "end_time",
+            "in": "query",
+            "description": "Inclusive end of the window, RFC3339.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TelemetryResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request: invalid path parameter, window or paging argument. The message names the offending field.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, unknown or expired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/api/v1/token": {
+      "post": {
+        "operationId": "issueToken",
+        "summary": "Exchange the static token for a short-lived access token",
+        "description": "Presents the long-lived static token and receives a short-lived signed access token, so the long-lived credential does not have to be pasted into a client. Only a static token may be exchanged: an access token is rejected, so a leaked one expires instead of renewing itself. The route exists only when the server is configured with a signing key.",
+        "tags": [
+          "Auth"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Missing, unknown or expired bearer token.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    "/healthz": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Liveness/readiness of the API and its database",
+        "description": "Pings ClickHouse without scanning the events table. Unauthenticated, because kubelet probes carry no Authorization header. Not a readiness gate for traffic: use the data routes for that.",
+        "tags": [
+          "Ops"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HealthResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The query failed.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ErrorResponse": {
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "Human-readable reason; the message names the offending field where one applies"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "title": "ErrorResponse"
+      },
+      "GPUListResponse": {
+        "properties": {
+          "gpus": {
+            "items": {
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "description": "Stable device identifier (the DCGM GPU UUID); use it in the telemetry path"
+                },
+                "device": {
+                  "type": "string",
+                  "description": "NVIDIA device name"
+                },
+                "index": {
+                  "type": "integer",
+                  "description": "GPU index on the host. NOT an identifier: use id in the telemetry path"
+                },
+                "hostname": {
+                  "type": "string",
+                  "description": "Host the GPU is installed in"
+                },
+                "model": {
+                  "type": "string",
+                  "description": "GPU model"
+                }
+              },
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "id",
+                "device",
+                "index",
+                "hostname",
+                "model"
+              ]
+            },
+            "type": "array"
+          },
+          "count": {
+            "type": "integer",
+            "description": "GPUs in this page (equals limit unless this is the last page)"
+          },
+          "total": {
+            "type": "integer",
+            "description": "GPUs that have telemetry"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Page size requested"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Zero-based offset this page started at"
+          },
+          "order": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "description": "Sort direction by device_id"
+          },
+          "next": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absolute URL of the next page; null on the last page"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "gpus",
+          "count",
+          "total",
+          "limit",
+          "offset",
+          "order",
+          "next"
+        ],
+        "title": "GPUListResponse"
+      },
+      "HealthResponse": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "ok"
+            ]
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "HealthResponse"
+      },
+      "TelemetryResponse": {
+        "properties": {
+          "events": {
+            "items": {
+              "properties": {
+                "event_id": {
+                  "type": "string",
+                  "description": "Unique id of this event: evt_\u003cpod\u003e_L\u003cloop\u003e_O\u003ccsv offset\u003e"
+                },
+                "source_ts": {
+                  "type": "string",
+                  "format": "date-time",
+                  "description": "When the streamer produced the event (UTC). start_time and end_time filter on this field"
+                },
+                "metric_name": {
+                  "type": "string",
+                  "description": "DCGM metric name"
+                },
+                "gpu_index": {
+                  "type": "integer",
+                  "description": "GPU index on the host"
+                },
+                "device": {
+                  "type": "string",
+                  "description": "NVIDIA device name"
+                },
+                "device_id": {
+                  "type": "string",
+                  "description": "Device id of the GPU this observation belongs to"
+                },
+                "model_name": {
+                  "type": "string",
+                  "description": "GPU model"
+                },
+                "hostname": {
+                  "type": "string",
+                  "description": "Host the GPU is installed in"
+                },
+                "value": {
+                  "type": "number",
+                  "description": "The metric value"
+                },
+                "cluster": {
+                  "type": "string",
+                  "description": "Cluster tag of the emitting streamer"
+                },
+                "pod_name": {
+                  "type": "string",
+                  "description": "Streamer pod that emitted the event"
+                },
+                "csv_line_offset": {
+                  "type": "integer",
+                  "description": "Row in the source metrics CSV this event came from"
+                },
+                "loop_count": {
+                  "type": "integer",
+                  "description": "How many times the source CSV had been replayed when this was emitted"
+                },
+                "mq_offset": {
+                  "type": "integer",
+                  "description": "Position of the event in the message queue log"
+                }
+              },
+              "additionalProperties": false,
+              "type": "object",
+              "required": [
+                "event_id",
+                "source_ts",
+                "metric_name",
+                "gpu_index",
+                "device",
+                "device_id",
+                "model_name",
+                "hostname",
+                "value",
+                "cluster",
+                "pod_name",
+                "csv_line_offset",
+                "loop_count",
+                "mq_offset"
+              ]
+            },
+            "type": "array"
+          },
+          "gpu_id": {
+            "type": "string",
+            "description": "The GPU whose telemetry this is"
+          },
+          "count": {
+            "type": "integer",
+            "description": "Events in this page (equals limit unless this is the last page)"
+          },
+          "total": {
+            "type": "integer",
+            "description": "Events matching the window"
+          },
+          "limit": {
+            "type": "integer",
+            "description": "Page size requested"
+          },
+          "offset": {
+            "type": "integer",
+            "description": "Zero-based offset this page started at"
+          },
+          "order": {
+            "type": "string",
+            "enum": [
+              "asc",
+              "desc"
+            ],
+            "description": "Sort direction by (source_ts"
+          },
+          "next": {
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Absolute URL of the next page; null on the last page"
+          },
+          "start_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive start of the applied window; absent if unbounded"
+          },
+          "end_time": {
+            "type": "string",
+            "format": "date-time",
+            "description": "Inclusive end of the applied window; absent if unbounded"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "events",
+          "gpu_id",
+          "count",
+          "total",
+          "limit",
+          "offset",
+          "order",
+          "next"
+        ],
+        "title": "TelemetryResponse"
+      },
+      "TokenResponse": {
+        "properties": {
+          "access_token": {
+            "type": "string",
+            "description": "Short-lived signed access token; send it as the bearer credential"
+          },
+          "token_type": {
+            "type": "string",
+            "enum": [
+              "Bearer"
+            ],
+            "description": "Always Bearer"
+          },
+          "expires_in": {
+            "type": "integer",
+            "description": "Access-token lifetime in seconds"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When the access token stops being accepted"
+          },
+          "identity": {
+            "type": "string",
+            "description": "The identity the token was issued for"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "access_token",
+          "token_type",
+          "expires_in",
+          "expires_at",
+          "identity"
+        ],
+        "title": "TokenResponse"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "opaque signed token",
+        "description": "Send `Authorization: Bearer <token>`. A long-lived static token works on every route. POST /api/v1/token exchanges one for a short-lived access token; that access token is accepted on the data routes but cannot be exchanged again."
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ]
+}

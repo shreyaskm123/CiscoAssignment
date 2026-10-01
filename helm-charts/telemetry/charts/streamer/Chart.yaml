@@ -1,0 +1,6 @@
+apiVersion: v2
+name: streamer
+description: Publishes the DCGM metrics CSV to the message queue using registry-driven partitioning (no static quorum needed).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

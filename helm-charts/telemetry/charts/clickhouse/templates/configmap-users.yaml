@@ -1,0 +1,28 @@
+{{- if not .Values.auth.existingSecret }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "clickhouse.fullname" . }}-users
+  labels:
+    app.kubernetes.io/name: clickhouse
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  # A passwordless `default` that is VALID on its own. The entrypoint trusts any
+  # users.d customization of `default` (it skips its own network-lockdown when
+  # users.d changes the user), so this fragment must define a complete, parseable
+  # user. NOTE: do NOT use <password remove='1'/> without also supplying an auth
+  # method - ClickHouse dies with Code 36: "one of password/no_password/etc must
+  # be specified" when `default` is left with zero authentication methods.
+  users.xml: |
+    <clickhouse>
+      <users>
+        <default>
+          <password></password>
+          <networks><ip>::/0</ip></networks>
+          <profile>default</profile>
+          <quota>default</quota>
+          <access_management>1</access_management>
+        </default>
+      </users>
+    </clickhouse>
+{{- end }}

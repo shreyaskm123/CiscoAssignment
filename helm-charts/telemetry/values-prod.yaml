@@ -1,0 +1,77 @@
+# Production / "authenticated" overlay for the telemetry stack.
+#
+# Always deploy with BOTH this file and the generated machine-local overlay:
+#
+#   helm upgrade --install telemetry ./helm-charts/telemetry -n telemetry \
+#     -f ./helm-charts/telemetry/values-prod.yaml \
+#     -f ./dist/values-local.yaml \
+#     --wait --timeout 10m
+#
+# scripts/kind-up.sh writes dist/values-local.yaml with the API server address
+# and the local image tags, neither of which can be hardcoded here. Deploying
+# with this file alone leaves every MQ replica a follower forever.
+#
+# Prerequisite: the Secrets must exist first.
+#   ./scripts/bootstrap-auth-secrets.sh
+#
+# All credentials live in Kubernetes Secrets created out-of-band by the
+# bootstrap script. No token or password is ever stored in this file or in
+# values.yaml.
+
+networkPolicy:
+  enabled: true
+
+# --- API: shared token store, one entry per client: "<identity>=<token>" ---
+apigateway:
+  auth:
+    existingSecret: telemetry-api-tokens
+    # Enables POST /api/v1/token. The static token above doubles as the refresh
+    # credential: a client presents it once and receives a short-lived signed
+    # access token, so the long-lived secret never has to be pasted into a
+    # Postman workspace or a shell history.
+    tokenSigningKeySecret: telemetry-api-token-key
+    tokenTTL: 15m
+  clickhouse:
+    credentialsSecret: telemetry-ch-apigateway
+
+# --- MQ: shared token store, plus per-service keys for least privilege ---
+messagequeue:
+  auth:
+    existingSecret: telemetry-mq-tokens
+  # The leader-election egress rule needs the API server's REAL address, which
+  # is different on every machine and therefore cannot live in this file.
+  #
+  # It used to be hardcoded here to 172.18.0.2/32, which worked on exactly one
+  # laptop. scripts/kind-up.sh now reads the control-plane node IP out of Docker
+  # and writes it to dist/values-local.yaml, which you pass with a second -f.
+  # If you skip that file, every MQ replica silently stays a follower forever
+  # while all of them report Running. Always deploy with both:
+  #
+  #   helm upgrade --install telemetry helm-charts/telemetry -n telemetry \
+  #     -f helm-charts/telemetry/values-prod.yaml \
+  #     -f dist/values-local.yaml --wait
+  #
+  # The image tag and pullPolicy are set the same way, for the same reason: the
+  # images are built and loaded locally, and `pullPolicy: Never` turns a missing
+  # tag into a loud ErrImageNeverPull rather than a silent pull of something else.
+  leaderElection:
+    enabled: true
+
+streamer:
+  mqAuth:
+    existingSecret: telemetry-mq-tokens
+
+collector:
+  mqAuth:
+    existingSecret: telemetry-mq-tokens
+  clickhouse:
+    credentialsSecret: telemetry-ch-collector
+
+# --- ClickHouse: scoped users.xml (hashed passwords) instead of the
+# --- development passwordless ConfigMap.
+clickhouse:
+  auth:
+    existingSecret: telemetry-clickhouse-users
+  # Replicas authenticate to each other (part fetches, ON CLUSTER DDL) with this.
+  interserver:
+    existingSecret: telemetry-ch-interserver

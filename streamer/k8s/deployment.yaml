@@ -1,0 +1,115 @@
+# Deployment for the telemetry streamer.
+#
+# SUPERSEDED BY THE HELM CHART for anything but a bare-metal walkthrough.
+# Prefer `make deploy` / `helm-charts/telemetry`. This manifest is kept for the
+# `k8s/` quick path in README.md; it must be kept in step with the chart by hand.
+#
+# Scale model: every replica runs the identical CSV (mounted from the
+# metrics-csv configMap) and registers with the MQ partition registry. Each
+# replica receives a unique index from its rank in the registry, so it never
+# needs to derive its identity from the pod name (Deployment pod suffixes are
+# random) and no external "total-replicas" value has to be kept in sync on
+# scale events. There is no static fallback: the registry is the only source
+# of the (index, total) layout.
+#
+# Partitioning stays correct automatically:
+#   - on scale UP the new pod joins, the registry returns a larger total and
+#     every pod repartitions (currentLineNum % total == index);
+#   - on scale DOWN the departing pod drains and deregisters (LeavePartition)
+#     and the survivors rebalance to the new total;
+#   - a pod that dies (kill -9) is swept from the registry after REGISTRY_TTL_S
+#     of missed heartbeats.
+#
+# No init containers, no /etc/streamer env injection, no streamer-layout
+# configMap — the message queue is the single source of truth for the layout.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: telemetry-streamer
+  namespace: telemetry
+  labels:
+    app: telemetry-streamer
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: telemetry-streamer
+  template:
+    metadata:
+      labels:
+        app: telemetry-streamer
+    spec:
+      serviceAccountName: telemetry-streamer
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: streamer
+          image: telemetry-streamer:latest
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: MQ_ADDR
+              # Matches helm-charts/.../messagequeue (leader Service). The old
+              # value here was `telemetry-mq:50051`, a Service the chart never
+              # creates, so this pod could not reach the MQ at all.
+              value: telemetry-messagequeue-leader:50051
+            - name: CLUSTER
+              value: "ai-prod-01"
+            - name: CSV_PATH
+              value: /mnt/data/metrics.csv
+            - name: REGISTRY_TTL_S
+              value: "15"
+            - name: REGISTRY_POLL_INTERVAL_MS
+              value: "5000"
+            - name: ROW_DELAY_MS
+              value: "5"
+            - name: BATCH_SIZE
+              value: "100"
+            - name: FLUSH_INTERVAL_MS
+              value: "200"
+            - name: RELOAD_CHECK_INTERVAL_S
+              value: "5"
+            - name: SHUTDOWN_GRACE_MS
+              value: "5000"
+          ports:
+            - name: metrics
+              containerPort: 9090
+            - name: health
+              containerPort: 8082
+          # These used to be `exec: ["/bin/true"]`, which cannot fail, so a
+          # stalled replica still reported 1/1 Running. They now hit the real
+          # health port the streamer actually serves.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            failureThreshold: 30
+            periodSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: metrics-csv
+              mountPath: /mnt/data
+      volumes:
+        - name: metrics-csv
+          configMap:
+            name: metrics-csv

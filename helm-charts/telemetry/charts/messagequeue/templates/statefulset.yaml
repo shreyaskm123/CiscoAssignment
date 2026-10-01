@@ -1,0 +1,228 @@
+{{/*
+Single StatefulSet of identical replicas.
+
+Every pod runs the same command with no role baked in. Role comes from the
+Kubernetes Lease at runtime: the winner promotes itself and labels itself
+leader, the losers replicate from it. That is what makes failover automatic -
+there is no second StatefulSet to convert, no Service selector to repoint, and
+no client to reconfigure. The old design pinned roles to two separate
+StatefulSets, which is exactly why its failover was a manual procedure.
+
+spec.selector deliberately omits the component label (see
+messagequeue.podSelector): a StatefulSet's selector must keep matching its own
+pods, and the elected pod mutates that label at runtime.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "messagequeue.fullname" . }}
+  labels:
+    app.kubernetes.io/name: messagequeue
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: {{ if .Values.leaderElection.enabled }}replica{{ else }}leader{{ end }}
+spec:
+  serviceName: {{ include "messagequeue.peersName" . }}
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "messagequeue.podSelector" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: messagequeue
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        # Role-agnostic. A replica relabels ITSELF to leader once it wins the
+        # lease; the initial value only decides which pod serves first.
+        app.kubernetes.io/component: replica
+      annotations:
+        prometheus.io/scrape: "false"
+    spec:
+      serviceAccountName: {{ include "messagequeue.serviceAccountName" . }}
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mq
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            # Downward API: the pod's own identity is the lease holder identity,
+            # and the leader-follower resolver derives the peer's DNS name from
+            # it. Hardcoding either would break on reschedule.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- if .Values.auth.existingSecret }}
+            # Tokens arrive via the environment, never a command-line flag:
+            # flags are visible to every process in the container.
+            - name: MQ_AUTH_TOKENS_FILE
+              value: /etc/telemetry/auth/tokens
+            - name: MQ_AUTH_TOKEN_FILE
+              value: /etc/telemetry/auth/mq
+            {{- end }}
+          args:
+            - -addr
+            - ":{{ .Values.port }}"
+            - -data-dir
+            - {{ .Values.dataDir | quote }}
+            - -sync-replicas
+            - {{ .Values.syncReplicas | quote }}
+            {{- if .Values.leaderElection.enabled }}
+            - -election
+            - -election-lease
+            - {{ .Values.leaderElection.leaseName | quote }}
+            - -election-lease-duration
+            - {{ .Values.leaderElection.leaseDuration | quote }}
+            - -election-renew-deadline
+            - {{ .Values.leaderElection.renewDeadline | quote }}
+            - -election-retry-period
+            - {{ .Values.leaderElection.retryPeriod | quote }}
+            - -leader-service
+            - {{ include "messagequeue.leaderName" . | quote }}
+            {{- end }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.port }}
+            - name: health
+              containerPort: {{ .Values.healthPort }}
+          # Liveness only asserts the process is up. It must NOT depend on being
+          # the leader: a follower is healthy, and a readiness/liveness probe
+          # tied to leadership would restart the surviving pod during a
+          # failover and destroy the quorum it was meant to preserve.
+          #
+          # A startupProbe, not initialDelaySeconds: a pod replaying a large WAL
+          # off a cold PVC can take far longer than the liveness budget. With
+          # only initialDelaySeconds the kubelet starts killing the container
+          # mid-replay and the restart loop never lets it finish, so a slow disk
+          # or a restored backup turns into permanent unavailability.
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            # 5s x 60 = up to 5 minutes of WAL replay before giving up.
+            periodSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            periodSeconds: 10
+            # 3 failures = 30s to notice a wedged process. No initialDelay: the
+            # startupProbe already gates the liveness->running transition, and
+            # once it succeeds the process is serving.
+            failureThreshold: 3
+            # Default is 1s, which is tight for a kubelet on a loaded node; a
+            # slow probe failure would look identical to a dead process.
+            timeoutSeconds: 3
+          # Readiness is where the stale-leader guard lives.
+          #
+          # The component=leader label routes clients, but a leader that has
+          # lost the API server cannot patch that label away - it has no route
+          # to the API server, which is precisely why it lost contact. Left
+          # alone it stays in the leader Service's endpoint list and keeps
+          # receiving publishes it must refuse, next to a peer that has already
+          # been promoted.
+          #
+          # /readyz reports NotReady when this node is the leader but its lease
+          # renewal has gone stale, judged on a local clock. Kubelet evaluates
+          # readiness itself, so the pod leaves the endpoint list without
+          # needing the API server - the one channel the partitioned node still
+          # has. A follower always reports ready so it can be promoted.
+          #
+          # failureThreshold x periodSeconds must exceed the election renew deadline
+          # ({{ .Values.leaderElection.renewDeadline }}) so a leader is not dropped
+          # from rotation while it can still prove it holds the lease.
+          #
+          # A healthy peer must not be taken out of rotation during that window
+          # either: at 3 x 5s = 15s against a 10s renewDeadline, a leader that
+          # is slow to renew is dropped just after it would have given up the
+          # lease anyway, so the two cannot both claim the lease.
+          #
+          # Rendered regardless of leaderElection.enabled: the binary answers
+          # /readyz in every mode (always ready when it holds no lease), so
+          # turning election off must not leave the pods with an unanswerable
+          # probe that kubelet then restarts forever.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/mq
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.auth.existingSecret }}
+            - name: auth-tokens
+              mountPath: /etc/telemetry/auth
+              readOnly: true
+            {{- end }}
+      {{- if .Values.auth.existingSecret }}
+      volumes:
+        - name: auth-tokens
+          secret:
+            secretName: {{ .Values.auth.existingSecret | quote }}
+            items:
+              - key: tokens
+                path: tokens
+              # Each replica presents this one token when it replicates from
+              # the elected leader, so a replica never mounts a client token.
+              - key: mq
+                path: mq
+        # readOnlyRootFilesystem: true means even /tmp needs a writable volume.
+        - name: tmp
+          emptyDir: {}
+      {{- else }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+      {{- end }}
+      {{- if .Values.podAntiAffinity }}
+      # Spread the replicas across nodes. Co-located replicas are one node
+      # failure away from a total outage, which would make the HA nominal.
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    {{- include "messagequeue.podSelector" . | nindent 20 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{ toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{ toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- if .Values.storage.className }}
+        storageClassName: {{ .Values.storage.className | quote }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.storage.size | quote }}

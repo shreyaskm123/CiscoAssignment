@@ -1,0 +1,66 @@
+{{/*
+RBAC for automatic leader election.
+
+Two capabilities, both required, both deliberately narrow:
+
+  leases (get/create/update) - contend for and renew the leader Lease. Update is
+    what makes acquisition safe: the API server rejects a stale resourceVersion
+    with 409, so exactly one replica can win. Without update the replicas would
+    deadlock; without create nobody could bootstrap.
+
+  pods (get/patch) on THIS pod only (resourceNames) - set and clear the
+    component label on itself, which is what moves the leader Service's
+    endpoint. resourceNames confines a compromised replica to relabelling
+    itself, not the rest of the fleet.
+
+Least privilege matters more than usual here: an MQ replica holds the pipeline's
+data, and it is the pod that a leader-failover hands new privileges to. Keeping
+its write access to one Lease and one pod name limits the blast radius of a
+compromise to a single queue.
+*/}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "messagequeue.serviceAccountName" . }}
+  labels:
+    app.kubernetes.io/name: messagequeue
+    app.kubernetes.io/instance: {{ .Release.Name }}
+{{- if .Values.leaderElection.enabled }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "messagequeue.fullname" . }}-election
+  labels:
+    app.kubernetes.io/name: messagequeue
+    app.kubernetes.io/instance: {{ .Release.Name }}
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "create", "update"]
+  # Only the replica's own pod, and only the label it needs to move the leader
+  # Service endpoint.
+  - apiGroups: [""]
+    resources: ["pods"]
+    resourceNames:
+      - "{{ include "messagequeue.fullname" . }}-0"
+      - "{{ include "messagequeue.fullname" . }}-1"
+      - "{{ include "messagequeue.fullname" . }}-2"
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "messagequeue.fullname" . }}-election
+  labels:
+    app.kubernetes.io/name: messagequeue
+    app.kubernetes.io/instance: {{ .Release.Name }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "messagequeue.fullname" . }}-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "messagequeue.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

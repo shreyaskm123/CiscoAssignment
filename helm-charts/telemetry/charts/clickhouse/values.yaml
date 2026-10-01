@@ -1,0 +1,94 @@
+# Replicated ClickHouse: one shard, `replicas` replicas, coordinated by a
+# 3-member ClickHouse Keeper ensemble that this chart also deploys. For a very
+# large cluster consider the clickhouse-operator or altinity chart instead.
+
+image:
+  repository: clickhouse/clickhouse-server
+  tag: 24.8-alpine
+  pullPolicy: IfNotPresent
+
+# Number of ClickHouse replicas (one shard). Every replica holds a full copy of
+# the data. 2 survives the loss of one.
+replicas: 2
+
+# Name of the cluster in <remote_servers>. The collector runs its DDL
+# `ON CLUSTER <name>`, so it must match collector.clickhouse.cluster.
+cluster:
+  name: telemetry
+
+# Credential the replicas use between themselves: it authenticates interserver
+# part fetches (port 9009) and lets `ON CLUSTER` DDL run as the user that issued
+# it. REQUIRED. Point existingSecret at a Secret YOU create outside Helm with a
+# `secret` key (scripts/bootstrap-auth-secrets.sh creates it). It is injected
+# as an environment variable, never rendered into a ConfigMap or into values.
+interserver:
+  existingSecret: ""
+
+# Spread the replicas across nodes. Soft (preferred), so a single-node cluster
+# such as kind still schedules both; on a real cluster they land on different
+# nodes and the loss of one node leaves a replica running.
+podAntiAffinity: true
+
+# ClickHouse Keeper: the Raft-based coordination service replication needs.
+# Three members tolerate the loss of one; one member would just move the single
+# point of failure, because every replicated table goes read-only without it.
+keeper:
+  replicas: 3
+  image:
+    repository: clickhouse/clickhouse-keeper
+    tag: 24.8-alpine
+    pullPolicy: IfNotPresent
+  storage:
+    size: 1Gi
+    className: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  nodeSelector: {}
+  tolerations: []
+
+dataDir: /var/lib/clickhouse
+
+storage:
+  size: 5Gi
+  className: ""
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1
+    memory: 2Gi
+
+# Native protocol (collector/api) and HTTP (ad-hoc queries).
+ports:
+  native: 9000
+  http: 8123
+  # Replica-to-replica part fetches. Never exposed to clients; the
+  # NetworkPolicy only opens it between ClickHouse pods.
+  interserver: 9009
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+# Scoped, non-admin ClickHouse users. Point existingSecret at a Secret YOU
+# create outside Helm (it must carry a users.d/users.xml key):
+#
+#   kubectl create secret generic telemetry-clickhouse-users -n telemetry \
+#     --from-file=users.xml=./users.xml
+#
+# The Secret holds password HASHES, not the passwords themselves; the raw
+# credentials the clients use live in a separate per-service Secret
+# (telemetry-ch-collector / telemetry-ch-apigateway). Helm values are kept out
+# of it on purpose: `helm get values` prints them in plaintext.
+#
+# Leave empty to keep the development default: a passwordless `default` user
+# reachable from anywhere (::/0). That is fine on a laptop and unsafe anywhere
+# else.
+auth:
+  existingSecret: ""

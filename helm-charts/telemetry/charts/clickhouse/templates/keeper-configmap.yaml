@@ -1,0 +1,40 @@
+{{- $ns := .Release.Namespace -}}
+{{- $keeper := include "clickhouse.keeperName" . -}}
+{{- $headless := include "clickhouse.keeperHeadlessName" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $keeper }}-config
+  labels:
+    {{- include "clickhouse.keeperSelectorLabels" . | nindent 4 }}
+data:
+  keeper_config.xml: |
+    <clickhouse>
+      <logger>
+        <level>information</level>
+        <console>true</console>
+      </logger>
+      <listen_host>0.0.0.0</listen_host>
+      <keeper_server>
+        <tcp_port>2181</tcp_port>
+        <!-- 1-based id derived from the pod ordinal by the container command. -->
+        <server_id from_env="KEEPER_ID"/>
+        <log_storage_path>/var/lib/clickhouse-keeper/coordination/log</log_storage_path>
+        <snapshot_storage_path>/var/lib/clickhouse-keeper/coordination/snapshots</snapshot_storage_path>
+        <four_letter_word_white_list>ruok,mntr,srvr,stat</four_letter_word_white_list>
+        <coordination_settings>
+          <operation_timeout_ms>10000</operation_timeout_ms>
+          <session_timeout_ms>30000</session_timeout_ms>
+          <raft_logs_level>warning</raft_logs_level>
+        </coordination_settings>
+        <raft_configuration>
+          {{- range $i := until (int .Values.keeper.replicas) }}
+          <server>
+            <id>{{ add $i 1 }}</id>
+            <hostname>{{ $keeper }}-{{ $i }}.{{ $headless }}.{{ $ns }}.svc.cluster.local</hostname>
+            <port>9234</port>
+          </server>
+          {{- end }}
+        </raft_configuration>
+      </keeper_server>
+    </clickhouse>

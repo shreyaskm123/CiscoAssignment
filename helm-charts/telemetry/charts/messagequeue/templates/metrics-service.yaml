@@ -1,0 +1,49 @@
+{{- if .Values.metrics.enabled }}
+{{- /*
+Per-replica NodePort access to the health port, which also serves /metrics.
+
+One Service per replica rather than a single Service selecting both pods. A
+single Service would round-robin, so repeated scrapes would alternate between
+leader and follower and any trend built from them would be two processes
+interleaved into nonsense. A stable URL per pod is what makes the numbers
+comparable, and it is the same reason the replica carries its own node label.
+
+This is deliberately off by default. The health port answers /metrics, which
+exposes queue internals (consumer ids, log offsets, depth) and needs no
+authentication, so publishing it on a node port is a real disclosure on a shared
+cluster. Enable it where reaching the port is acceptable, such as a local kind
+cluster, and prefer a scrape-only Prometheus Service there.
+*/}}
+{{- range $i := until (int .Values.replicas) }}
+{{- $name := printf "%s-metrics-%d" (include "messagequeue.fullname" $) $i }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  labels:
+    app.kubernetes.io/name: messagequeue
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    app.kubernetes.io/component: metrics
+  annotations:
+    # Records which replica this URL is, so a browser tab left open across a
+    # reschedule is not silently reporting a different process.
+    telemetry.dev/replica: "{{ $i }}"
+spec:
+  type: NodePort
+  # Pin to the single pod with this ordinal. statefulset.kubernetes.io/pod-name
+  # is set by the StatefulSet controller and is the only reliable way to address
+  # one replica of a StatefulSet by name.
+  selector:
+    app.kubernetes.io/name: messagequeue
+    app.kubernetes.io/instance: {{ $.Release.Name }}
+    statefulset.kubernetes.io/pod-name: {{ include "messagequeue.fullname" $ }}-{{ $i }}
+  ports:
+    - name: metrics
+      port: {{ $.Values.healthPort }}
+      targetPort: health
+      {{- if $.Values.metrics.nodePortBase }}
+      nodePort: {{ add $.Values.metrics.nodePortBase $i }}
+      {{- end }}
+{{- end }}
+{{- end }}
